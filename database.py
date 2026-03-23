@@ -19,8 +19,6 @@ def setup_database():
     if conn is not None:
         try:
             cursor = conn.cursor()
-            # יצירת טבלה עם השדות שנדרשו במשימה
-            # שים לב ש post_link מוגדר כ-UNIQUE כדי למנוע כפילויות
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS posts (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -54,8 +52,6 @@ def insert_post(platform, username, post_text, timestamp, post_link):
             print(f"[+] Saved new post from {username} on {platform}")
             return True
         except sqlite3.IntegrityError:
-            # שגיאה זו קופצת אוטומטית אם אנחנו מנסים להכניס לינק שכבר קיים
-            # כך אנחנו עומדים בדרישה של מניעת כפילויות בקלות!
             print(f"[-] Duplicate post ignored: {post_link}")
             return False
         except Error as e:
@@ -64,6 +60,5 @@ def insert_post(platform, username, post_text, timestamp, post_link):
         finally:
             conn.close()
 
-# בלוק בדיקה - ירוץ רק אם נפעיל את הקובץ הזה ישירות
 if __name__ == '__main__':
     setup_database()

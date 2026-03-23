@@ -4,6 +4,7 @@ import pickle
 import json
 import sys
 import time
+import subprocess
 from datetime import datetime
 from urllib.parse import quote_plus, urlparse
 import undetected_chromedriver as uc
@@ -15,7 +16,6 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
-# ייבוא קובץ מסד הנתונים שיצרנו
 import database
 
 BASE_URL = "https://x.com"
@@ -24,7 +24,7 @@ LEGACY_COOKIES_FILE = "twitter_cookies.pkl"
 DEFAULT_WAIT_SECONDS = 20
 DEFAULT_MAX_TWEETS = 25
 DEFAULT_SCROLL_ROUNDS = 4
-DEFAULT_LOGIN_TIMEOUT_SECONDS = 120 # קיצרתי את זמן ההמתנה להתחברות
+DEFAULT_LOGIN_TIMEOUT_SECONDS = 120
 DEBUG_OUTPUT_DIR = "debug_output"
 CHROME_USER_DATA_DIR = os.getenv("CHROME_USER_DATA_DIR", "").strip()
 CHROME_PROFILE_DIRECTORY = os.getenv("CHROME_PROFILE_DIRECTORY", "Default").strip() or "Default"
@@ -58,29 +58,68 @@ def save_debug_artifacts(driver, label, debug_enabled):
     print(f"[DEBUG] Saved page source: {html_path}")
 
 
+def get_working_chrome_path():
+    """Finds a working Chrome executable. Bypasses corrupted ones."""
+    paths = [
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), r"Google\Chrome\Application\chrome.exe")
+    ]
+    for path in paths:
+        if os.path.exists(path):
+            try:
+                # Test if the executable is corrupted (WinError 14001)
+                subprocess.run([path, "--version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+                return path
+            except Exception:
+                continue
+    return None
+
 def create_driver(use_chrome_profile=True, headless=True):
     """
-    Creates a Chrome WebDriver using undetected-chromedriver 
-    to bypass anti-bot mechanisms and fix headless crashes.
+    Creates a Chrome WebDriver.
+    Uses standard Selenium for true headless mode to prevent unwanted popups,
+    and undetected-chromedriver for headed login mode.
     """
-    options = uc.ChromeOptions()
+    if headless:
+        options = webdriver.ChromeOptions()
+    else:
+        options = uc.ChromeOptions()
     
+    # Setup configurations similar to the working Headless project example
+    options.add_argument("--disable-gpu")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--window-size=1920,1080")
+    options.add_argument("--lang=en-US")
+    options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     options.add_argument("--disable-notifications")
     options.add_argument("--mute-audio")
     
+    # Disable images to speed up loading and evade some detection rules
+    prefs = {"profile.managed_default_content_settings.images": 2}
+    options.add_experimental_option("prefs", prefs)
+    
     if headless:
-        # undetected-chromedriver יודע לטפל במצב Headless בצורה יציבה
-        options.add_argument("--headless")
+        options.add_argument("--headless=new")
         
     if use_chrome_profile and has_chrome_profile_config():
         options.add_argument(f"--user-data-dir={CHROME_USER_DATA_DIR}")
         options.add_argument(f"--profile-directory={CHROME_PROFILE_DIRECTORY}")
         
     try:
-        # uc.Chrome patches the browser executable automatically under the hood!
-        driver = uc.Chrome(options=options)
-        return driver
+        if headless:
+            # Use standard Selenium for true invisible headless operation
+            driver = webdriver.Chrome(options=options)
+            return driver
+        else:
+            # Use undetected-chromedriver for headed mode (e.g. initial login)
+            chrome_path = get_working_chrome_path()
+            if chrome_path:
+                driver = uc.Chrome(options=options, browser_executable_path=chrome_path, suppress_welcome=True)
+            else:
+                driver = uc.Chrome(options=options, suppress_welcome=True)
+            return driver
     except Exception as error:
         print(f"[-] Failed to start undetected-chromedriver: {error}")
         raise
@@ -238,7 +277,7 @@ def extract_tweet_data(tweet):
         link_element = time_element.find_element(By.XPATH, './..')
         post_link = link_element.get_attribute("href")
     except NoSuchElementException:
-        return None # אם אין זמן או לינק (למשל פרסומות), נדלג
+        return None 
 
     try:
         post_text = tweet.find_element(By.XPATH, './/div[@data-testid="tweetText"]').text.strip()
@@ -302,7 +341,6 @@ def handle_login(
     else:
         print(f"[!] Cookies file '{COOKIES_FILE}' not found or invalid.")
 
-    # התיקון הקריטי: אם אנחנו במצב מוסתר, אי אפשר להתחבר ידנית!
     if not allow_manual_login:
         print("[-] Cannot perform manual login in headless mode.")
         print("[!] Action Required: Please run 'python scraper.py login' first to generate cookies.")
@@ -327,7 +365,6 @@ def handle_login(
 
 def create_cookies_file(manual_login_timeout=DEFAULT_LOGIN_TIMEOUT_SECONDS, debug_enabled=False):
     """Opens X login visibly, waits for a real session, and saves fresh cookies to disk."""
-    # יוצר דפדפן גלוי במיוחד בשביל ההתחברות הראשונית
     driver = create_driver(use_chrome_profile=False, headless=False)
     try:
         if not handle_login(
@@ -361,7 +398,6 @@ def fetch_twitter_posts(
     seen_links = set()
     
     try:
-        # אם הדפדפן מוסתר, אסור לאפשר התחברות ידנית (כי המשתמש לא יראה את חלון ההתחברות)
         allow_manual_login = not headless
 
         if not handle_login(
@@ -416,7 +452,14 @@ def fetch_twitter_posts(
         save_debug_artifacts(driver, "selenium_error", debug_enabled)
     finally:
         print("[*] Closing headless browser...")
-        driver.quit()
+        try:
+            driver.quit()
+        except:
+            pass
+        try:
+            driver.__class__.__del__ = lambda self: None
+        except:
+            pass
         
     return posts_data
 
@@ -451,13 +494,11 @@ def run_scraper(keyword, max_tweets=DEFAULT_MAX_TWEETS, debug_enabled=False, hea
 if __name__ == "__main__":
     args = parse_args(sys.argv[1:])
 
-    # 1. מצב התחברות מיוחד - פותח דפדפן במיוחד כדי לשמור עוגיות
     if args.mode == "login":
         print("[*] Login mode: Opening visible browser to generate fresh cookies...")
         create_cookies_file(manual_login_timeout=args.login_timeout, debug_enabled=args.debug)
         raise SystemExit(0)
 
-    # 2. מצב ריצה רגיל - אם לא ביקשנו לראות את הדפדפן, נריץ ברקע בצורה שקופה!
     is_headless = not args.show_browser
     
     if has_chrome_profile_config():
